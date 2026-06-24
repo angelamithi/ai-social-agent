@@ -74,17 +74,31 @@ Title: {title}
 Summary: {summary}
 URL: {url}
 
-Before writing: confirm the real subject here is AI / AI agents. If this source item \
-is fundamentally a crypto-market or blockchain-technology story with no genuine AI \
-angle, find the most honest AI-adjacent framing available (e.g. "here's a story about \
-how money moves in crypto markets — and it's exactly the kind of payment rail AI \
-agents are starting to use to transact with each other") rather than writing it as a \
-pure crypto piece. AI leads; blockchain/crypto/tokenization only ever supports.
+Before writing: confirm there's a real reason this story belongs on an AI-education \
+account. Two things qualify:
+(a) The story is directly about AI/AI agents — how they work, what they're doing, \
+    what it means for people.
+(b) A known AI company (OpenAI, Anthropic, Google DeepMind, Meta AI, etc.) is a \
+    meaningful, named participant — e.g. funding something, partnering on something, \
+    launching something — even if the subject matter itself (health research, \
+    hardware, policy) isn't AI technology per se. In this case, frame the post \
+    honestly as "here's something AI company X is doing, and here's why that's \
+    interesting coming from a company built on AI" — be upfront that the news ITSELF \
+    isn't an AI breakthrough, while still making it a worthwhile read (e.g. "It's \
+    interesting that an AI company is putting serious money into this — it says \
+    something about where they think the next decade of value creation actually is.")
 
-If — after genuinely trying — this story has NO honest AI angle at all (e.g. an AI \
-company is only mentioned in passing, like a funding/sponsorship credit, with nothing \
-actually about AI itself), do NOT force it and do NOT write prose explaining why. \
-Instead return EXACTLY this JSON shape, with skip=true and nothing else:
+If this story is fundamentally a crypto-market or blockchain-technology story with no \
+genuine AI angle and no AI company involvement either, find the most honest \
+AI-adjacent framing available (e.g. "here's a story about how money moves in crypto \
+markets — and it's exactly the kind of payment rail AI agents are starting to use to \
+transact with each other") rather than writing it as a pure crypto piece. AI leads; \
+blockchain/crypto/tokenization only ever supports.
+
+Only skip if NEITHER (a) NOR (b) applies at all — i.e. no AI subject matter and no \
+named AI company involved in any meaningful way. In that rare case, do NOT force it \
+and do NOT write prose explaining why. Instead return EXACTLY this JSON shape, with \
+skip=true and nothing else:
 {{"skip": true, "skip_reason": "<one short sentence explaining why>"}}
 
 Otherwise, write three platform-specific drafts about this topic, all consistent in \

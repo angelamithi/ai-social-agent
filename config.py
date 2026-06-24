@@ -73,8 +73,15 @@ NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL")  # not wired up by default, see README
 # standalone crypto/market news — see TOPIC_KEYWORDS and the generation
 # prompt in generate.py for how that's enforced downstream.
 # Add/remove freely. Keep the list reasonably small — quality over quantity.
+#
+# Note: the old feedburner.com TechCrunch URL was permanently dead (404)
+# as of June 2026 — feedburner.com itself appears to be shutting down.
+# Replaced with TechCrunch's current category feed. hnrss.org has shown
+# occasional transient 502s — that's handled gracefully now (timeout +
+# per-feed try/except in ingest.py), so a flaky feed just gets skipped
+# for that one run rather than blocking anything.
 RSS_SOURCES = [
-    "https://feeds.feedburner.com/TechCrunch/artificial-intelligence",
+    "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://www.technologyreview.com/feed/",
     "https://hnrss.org/newest?q=AI+agent",
     "https://hnrss.org/newest?q=artificial+intelligence",
