@@ -28,9 +28,15 @@ def fetch_rss_items(max_per_feed: int = 10) -> list:
             summary = entry.get("summary", "") or entry.get("description", "")
             link = entry.get("link", "")
 
-            # Relevance filter
+            # Relevance filter — AI is the primary topic. A story must
+            # mention something AI-related to qualify at all. Blockchain/
+            # crypto terms alone are NOT sufficient on their own (that's
+            # what was letting pure crypto-market news dominate before) —
+            # they only matter as a secondary angle on an AI story (e.g.
+            # "AI agents executing on-chain transactions").
             text_blob = f"{title} {summary}".lower()
-            if not any(kw in text_blob for kw in config.TOPIC_KEYWORDS):
+            has_ai_match = any(kw in text_blob for kw in config.AI_KEYWORDS)
+            if not has_ai_match:
                 continue
 
             # Recency filter (best-effort; skip if no parseable date)

@@ -2,8 +2,13 @@
 # each time it runs, so add new ones at the bottom (or top, your call) —
 # order just determines which gets used next.
 #
-# Example:
-# The rise of multi-agent orchestration frameworks like AutoGen and CrewAI
-# How zero-knowledge proofs are being used in blockchain scaling in 2026
+# Main topic is AI / AI agents. Blockchain, crypto, and tokenization are
+# subtopics only — mention them when they're genuinely how an AI agent
+# operates (e.g. agents transacting with each other using crypto), not
+# as standalone crypto/market topics.
+#
+# Example (good — AI-led):
+# How AI agents are starting to pay each other in crypto to complete tasks autonomously
+# What it means that AI agents can now hold their own crypto wallets
 #
 # Lines starting with # are ignored.

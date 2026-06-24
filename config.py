@@ -67,25 +67,41 @@ NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL")  # not wired up by default, see README
 # ---------------------------------------------------------------------------
 # Content sources
 # ---------------------------------------------------------------------------
-# RSS feeds covering AI, blockchain, crypto, and AI-agent topics.
+# RSS feeds. AI is the primary focus — most sources here are AI-first.
+# Blockchain/crypto are secondary topics, only relevant through the lens
+# of AI agents (e.g. agents executing on-chain transactions), not as
+# standalone crypto/market news — see TOPIC_KEYWORDS and the generation
+# prompt in generate.py for how that's enforced downstream.
 # Add/remove freely. Keep the list reasonably small — quality over quantity.
 RSS_SOURCES = [
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://www.theblock.co/rss.xml",
     "https://feeds.feedburner.com/TechCrunch/artificial-intelligence",
     "https://www.technologyreview.com/feed/",
     "https://hnrss.org/newest?q=AI+agent",
-    "https://hnrss.org/newest?q=blockchain",
+    "https://hnrss.org/newest?q=artificial+intelligence",
+    "https://hnrss.org/newest?q=LLM",
+    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+    # Secondary: AI-agents-using-crypto angle only (not general crypto news)
+    "https://hnrss.org/newest?q=AI+agent+blockchain",
 ]
 
 # Manual topic queue file — add lines anytime, the agent will consume them
 MANUAL_TOPICS_FILE = "topics.txt"
 
-# Keywords used to filter generic RSS feeds for relevance
-TOPIC_KEYWORDS = [
+# Keywords used to filter generic RSS feeds for relevance.
+# AI_KEYWORDS: primary topic — any single match qualifies a story.
+# BLOCKCHAIN_KEYWORDS: secondary — these only qualify a story when paired
+# with an AI match (see ingest.py), so a pure crypto-market story (price
+# moves, exchange listings, etc. with no AI angle) gets filtered out,
+# while "AI agents executing blockchain transactions" still gets through.
+AI_KEYWORDS = [
     "ai agent", "agentic", "llm", "large language model", "autonomous agent",
-    "blockchain", "crypto", "web3", "smart contract", "defi",
     "artificial intelligence", "machine learning", "openai", "anthropic",
+    "generative ai", "neural network", "chatbot", "copilot", "claude",
+    "gpt", "gemini", "multimodal",
+]
+BLOCKCHAIN_KEYWORDS = [
+    "blockchain", "crypto", "web3", "smart contract", "defi",
+    "tokenization", "on-chain", "stablecoin",
 ]
 
 # ---------------------------------------------------------------------------
@@ -135,7 +151,12 @@ LOG_FILE = "run_log.txt"
 # check current per-image pricing before switching, it varies a lot by tier.
 IMAGE_MODEL = "gpt-image-1-mini"
 IMAGE_SIZE = "1536x1024"  # landscape — fits well in X/LinkedIn/Facebook feeds
-IMAGE_QUALITY = "low"  # low/medium/high — low is usually plenty for social posts
+# "medium" — infographic-style images need denser, smaller, more precise
+# text than a simple illustration; "low" quality renders text/numbers
+# unreliably (garbled words, wrong digits). Bump to "high" if medium
+# output still isn't crisp enough once you see real results — check
+# current per-image pricing before switching, cost scales with quality.
+IMAGE_QUALITY = "medium"
 BRAND_NAME = "Afrivance.ai"  # stamped in the footer of every generated image
 
 # ---------------------------------------------------------------------------
