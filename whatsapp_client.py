@@ -19,7 +19,7 @@ import requests
 
 import config
 
-GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
+GRAPH_API_BASE = "https://graph.facebook.com/v23.0"
 
 
 def _headers() -> dict:
@@ -37,9 +37,17 @@ def send_approval_request(image_url: str, caption_text: str, approval_id: str) -
     """Send the approval-request template: image header + body text +
     two quick-reply buttons (Approve / Reject).
 
+    The template body uses a NAMED placeholder ({{post_summary}}), not
+    the older positional ({{1}}) style — Meta's template builder now
+    requires named variables (lowercase letters, numbers, underscores).
+    Sending a named-parameter template requires "parameter_format":
+    "NAMED" on the template object, and a "parameter_name" field on
+    each body parameter matching the name used in the approved
+    template — see README / WHATSAPP_BODY_PARAM_NAME in config.py.
+
     `caption_text` should be a short summary (the template body has a
-    character limit) — full drafts live in drafts_for_review.md, this
-    message just needs to be enough for you to make the call.
+    character limit) — full drafts are sent via WhatsApp text after
+    approval, this message just needs to be enough for you to decide.
 
     The button payloads are encoded as "approve:<approval_id>" and
     "reject:<approval_id>" so the webhook can match the reply back to
@@ -54,6 +62,7 @@ def send_approval_request(image_url: str, caption_text: str, approval_id: str) -
         "template": {
             "name": config.WHATSAPP_APPROVAL_TEMPLATE_NAME,
             "language": {"code": config.WHATSAPP_TEMPLATE_LANGUAGE},
+            "parameter_format": "NAMED",
             "components": [
                 {
                     "type": "header",
@@ -64,7 +73,11 @@ def send_approval_request(image_url: str, caption_text: str, approval_id: str) -
                 {
                     "type": "body",
                     "parameters": [
-                        {"type": "text", "text": caption_text},
+                        {
+                            "type": "text",
+                            "text": caption_text,
+                            "parameter_name": config.WHATSAPP_BODY_PARAM_NAME,
+                        },
                     ],
                 },
                 {
