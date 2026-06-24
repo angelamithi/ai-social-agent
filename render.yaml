@@ -1,0 +1,92 @@
+# Render Blueprint — defines all three services this project needs.
+#
+# Deploy with: push this repo to GitHub/GitLab, then in the Render
+# Dashboard choose "New > Blueprint" and point it at the repo. Render
+# reads this file and provisions everything below in one go.
+#
+# After the first deploy, you still need to:
+#   1. Fill in the real secret values for every envVar marked sync: false
+#      (Render will prompt you for these in the dashboard — they are
+#      deliberately NOT stored in this file, since this file is checked
+#      into git).
+#   2. Set PUBLIC_BASE_URL once you know the web service's onrender.com
+#      URL (shown in the Render dashboard after first deploy).
+#   3. Configure the Meta webhook Callback URL as {that URL}/webhook
+#      (see README).
+#
+# Both services share the same env vars via the "agent-secrets" group
+# below, so you only fill in API keys once rather than twice.
+
+databases:
+  - name: agent-db
+    plan: free
+    databaseName: social_agent
+    user: social_agent
+
+services:
+  # Always-on web service — receives WhatsApp button taps from Meta and
+  # serves generated images back to Meta for the template header.
+  # Paid "starter" plan recommended (not free) so it never sleeps —
+  # a sleeping service means delayed/missed approval taps.
+  - type: web
+    name: agent-webhook
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn webhook_server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - fromGroup: agent-secrets
+      - key: DATABASE_URL
+        fromDatabase:
+          name: agent-db
+          property: connectionString
+
+  # Daily cron job — generates content + image, runs safety checks, and
+  # sends the WhatsApp approval request. Render's free disk-less cron
+  # job tier is fine here since this process holds no state of its own
+  # (everything goes through agent-db).
+  - type: cron
+    name: agent-daily-run
+    runtime: python
+    plan: starter
+    schedule: "0 8 * * *"  # 08:00 UTC daily — adjust to your timezone
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - fromGroup: agent-secrets
+      - key: DATABASE_URL
+        fromDatabase:
+          name: agent-db
+          property: connectionString
+
+envVarGroups:
+  - name: agent-secrets
+    envVars:
+      - key: ENABLED
+        value: "true"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: X_API_KEY
+        sync: false
+      - key: X_API_SECRET
+        sync: false
+      - key: X_ACCESS_TOKEN
+        sync: false
+      - key: X_ACCESS_TOKEN_SECRET
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: APPROVER_PHONE_NUMBER
+        sync: false
+      - key: WHATSAPP_APPROVAL_TEMPLATE_NAME
+        value: post_approval_request
+      - key: PUBLIC_BASE_URL
+        sync: false

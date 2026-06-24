@@ -1,0 +1,9 @@
+# Add one topic per line below. The agent reads and removes the TOP line
+# each time it runs, so add new ones at the bottom (or top, your call) —
+# order just determines which gets used next.
+#
+# Example:
+# The rise of multi-agent orchestration frameworks like AutoGen and CrewAI
+# How zero-knowledge proofs are being used in blockchain scaling in 2026
+#
+# Lines starting with # are ignored.
