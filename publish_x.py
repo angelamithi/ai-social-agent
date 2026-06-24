@@ -9,9 +9,17 @@ Note on cost (as of mid-2026): X moved to pay-per-use pricing. Plain text
 posts cost ~$0.015 each; posts containing a URL cost ~$0.20 each. Check
 the X Developer Console for current rates before relying on these numbers.
 
-Media uploads still go through the older v1.1 media/upload endpoint —
-X has not moved media upload to v2 — and the resulting media_id is then
-attached to a v2 tweet.
+Media upload uses the v2 endpoint (POST /2/media/upload). The legacy
+v1.1 endpoint (upload.twitter.com/1.1/media/upload.json) was
+permanently sunset by X on June 9, 2025 and now returns an empty-body
+403 at the edge for any request — there is no fallback to it. The
+resulting media_id from the v2 upload is attached to a v2 tweet exactly
+as before.
+
+This uses a simple single-shot upload (image bytes in one request),
+which is sufficient for small images like the ones this agent
+generates. X's chunked INIT/APPEND/FINALIZE flow exists for video and
+large files but isn't needed here.
 """
 
 import requests
@@ -19,8 +27,8 @@ from requests_oauthlib import OAuth1
 
 import config
 
-X_POST_ENDPOINT = "https://api.twitter.com/2/tweets"
-X_MEDIA_UPLOAD_ENDPOINT = "https://upload.twitter.com/1.1/media/upload.json"
+X_POST_ENDPOINT = "https://api.x.com/2/tweets"
+X_MEDIA_UPLOAD_ENDPOINT = "https://api.x.com/2/media/upload"
 
 
 def _auth() -> OAuth1:
@@ -33,7 +41,7 @@ def _auth() -> OAuth1:
 
 
 def upload_media(image_bytes: bytes) -> str:
-    """Upload image bytes to X and return its media_id_string.
+    """Upload image bytes to X (v2 endpoint) and return the media id.
 
     Takes raw bytes rather than a file path — the cron job and the web
     service that calls this don't share a local disk on Render, so
@@ -45,11 +53,14 @@ def upload_media(image_bytes: bytes) -> str:
     response = requests.post(
         X_MEDIA_UPLOAD_ENDPOINT,
         auth=_auth(),
+        data={"media_category": "tweet_image"},
         files={"media": ("image.png", image_bytes, "image/png")},
         timeout=30,
     )
     response.raise_for_status()
-    return response.json()["media_id_string"]
+    body = response.json()
+    # v2 wraps the result in a "data" envelope, unlike the old v1.1 shape.
+    return body["data"]["id"]
 
 
 def post_tweet(text: str, image_bytes: bytes = None) -> dict:
