@@ -34,7 +34,16 @@ APPROVER_PHONE_NUMBER = os.getenv("APPROVER_PHONE_NUMBER")  # your number, E.164
 # Name of the pre-approved WhatsApp template used to send the approval
 # request (image header + quick reply buttons). See README for setup.
 WHATSAPP_APPROVAL_TEMPLATE_NAME = os.getenv("WHATSAPP_APPROVAL_TEMPLATE_NAME", "post_approval_request")
-WHATSAPP_TEMPLATE_LANGUAGE = "en_US"
+# Must exactly match the language the template was actually created/
+# approved under in WhatsApp Manager — check via the message_templates
+# API endpoint if unsure, since the UI's "English (US)" label doesn't
+# always mean the underlying code is "en_US"; it can be plain "en".
+WHATSAPP_TEMPLATE_LANGUAGE = "en"
+# Name of the named body variable used in the template, e.g. {{post_summary}}.
+# Must exactly match whatever name you used when creating the template in
+# WhatsApp Manager (Meta's newer template builder requires named, not
+# numbered, placeholders — lowercase letters/numbers/underscores only).
+WHATSAPP_BODY_PARAM_NAME = os.getenv("WHATSAPP_BODY_PARAM_NAME", "post_summary")
 # Public base URL this server is reachable at (e.g. https://yourapp.onrender.com
 # or an ngrok URL during local testing) — used to build the image URL Meta
 # needs to fetch for the template header, since WhatsApp template media

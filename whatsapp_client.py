@@ -38,12 +38,14 @@ def send_approval_request(image_url: str, caption_text: str, approval_id: str) -
     two quick-reply buttons (Approve / Reject).
 
     The template body uses a NAMED placeholder ({{post_summary}}), not
-    the older positional ({{1}}) style — Meta's template builder now
-    requires named variables (lowercase letters, numbers, underscores).
-    Sending a named-parameter template requires "parameter_format":
-    "NAMED" on the template object, and a "parameter_name" field on
-    each body parameter matching the name used in the approved
-    template — see README / WHATSAPP_BODY_PARAM_NAME in config.py.
+    the older positional ({{1}}) style. Confirmed via live testing
+    against the real API: Meta does NOT accept a top-level
+    "parameter_format" field on the template object (it's rejected
+    outright as an unexpected key, regardless of API version) — naming
+    is instead inferred automatically from the "parameter_name" field
+    present on each body parameter, which must match the named
+    variable used in the approved template exactly (see
+    WHATSAPP_BODY_PARAM_NAME in config.py).
 
     `caption_text` should be a short summary (the template body has a
     character limit) — full drafts are sent via WhatsApp text after
@@ -62,7 +64,6 @@ def send_approval_request(image_url: str, caption_text: str, approval_id: str) -
         "template": {
             "name": config.WHATSAPP_APPROVAL_TEMPLATE_NAME,
             "language": {"code": config.WHATSAPP_TEMPLATE_LANGUAGE},
-            "parameter_format": "NAMED",
             "components": [
                 {
                     "type": "header",
