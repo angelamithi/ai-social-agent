@@ -74,17 +74,23 @@ Title: {title}
 Summary: {summary}
 URL: {url}
 
-Write three platform-specific drafts about this topic, all consistent in the \
-underlying facts/opinion but adapted in tone and length. Remember: the reader is a \
-smart but non-technical person — your job is to make them go "oh, THAT'S what that \
-means" by the end, not to impress them with technical accuracy.
-
 Before writing: confirm the real subject here is AI / AI agents. If this source item \
 is fundamentally a crypto-market or blockchain-technology story with no genuine AI \
 angle, find the most honest AI-adjacent framing available (e.g. "here's a story about \
 how money moves in crypto markets — and it's exactly the kind of payment rail AI \
 agents are starting to use to transact with each other") rather than writing it as a \
 pure crypto piece. AI leads; blockchain/crypto/tokenization only ever supports.
+
+If — after genuinely trying — this story has NO honest AI angle at all (e.g. an AI \
+company is only mentioned in passing, like a funding/sponsorship credit, with nothing \
+actually about AI itself), do NOT force it and do NOT write prose explaining why. \
+Instead return EXACTLY this JSON shape, with skip=true and nothing else:
+{{"skip": true, "skip_reason": "<one short sentence explaining why>"}}
+
+Otherwise, write three platform-specific drafts about this topic, all consistent in \
+the underlying facts/opinion but adapted in tone and length. Remember: the reader is \
+a smart but non-technical person — your job is to make them go "oh, THAT'S what that \
+means" by the end, not to impress them with technical accuracy.
 
 1. "x": Twitter/X style. Conversational and punchy, but give the idea room to \
    breathe — aim for 200-270 characters, not the bare minimum. Do NOT include a URL \
@@ -156,6 +162,11 @@ def generate_drafts(item: dict) -> dict:
         drafts = json.loads(raw_text)
     except json.JSONDecodeError as e:
         print(f"[generate] Failed to parse Claude response as JSON: {e}\nRaw: {raw_text[:300]}")
+        return None
+
+    if isinstance(drafts, dict) and drafts.get("skip") is True:
+        reason = drafts.get("skip_reason", "no reason given")
+        print(f"[generate] Claude skipped this item — no genuine AI angle: {reason}")
         return None
 
     for key in ("x", "linkedin", "facebook", "image_headline", "visual_concept"):

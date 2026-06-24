@@ -86,7 +86,7 @@ def _extract_stat_line(item: dict) -> str:
     return match.group(0) if match else None
 
 
-def _build_prompt(item: dict, headline: str, palette: str) -> str:
+def _build_prompt(item: dict, headline: str, visual_concept: str, palette: str) -> str:
     stat = _extract_stat_line(item)
     stat_instruction = (
         f'Include one small stat callout box quoting this exact figure from '
@@ -113,10 +113,9 @@ text rendered verbatim: "{headline}" — exact wording, no extra words, no \
 duplicated text, no typos. Use strong sans-serif typography, mixed sizes for \
 emphasis on key words, similar to a bold magazine cover headline treatment.
 
-2. VISUAL ZONE (middle ~50%): one clear supporting visual metaphor or scene \
-related to the topic — favor a concrete, specific visual idea (a robot helper, \
-a network of connected devices, a simple human silhouette interacting with \
-technology, an abstract data-flow concept) over generic stock-tech imagery. \
+2. VISUAL ZONE (middle ~50%): depict exactly this scene/metaphor: \
+"{visual_concept}". Render it clearly and concretely — this is the specific \
+visual idea for this post, don't substitute a generic alternative. \
 {stat_instruction} If icons are used, keep them simple, flat, and clearly \
 labeled with very short (1-3 word) text only.
 
@@ -142,10 +141,12 @@ Topic context: {item.get("title", "AI and technology")}
 def generate_image(item: dict, drafts: dict = None) -> dict:
     """Generate a single infographic-style image for the given content item.
 
-    `drafts` (optional) should be the dict returned by generate.generate_drafts
-    — when provided, the punchy X draft is used as the infographic headline
-    (it's already short and attention-grabbing) instead of the raw, often
-    dry RSS/source title.
+    `drafts` (optional) should be the dict returned by generate.generate_drafts.
+    When it includes "image_headline" and "visual_concept" (purpose-built
+    fields for image generation — short, punchy headline + one concrete
+    visual scene), those are used directly. Falls back to the X draft
+    text / raw item title if those aren't present, for backward
+    compatibility with older drafts dicts.
 
     Returns a dict {"image_id": <db.py image id>, "prompt": <prompt used>}
     or None if generation failed.
@@ -154,15 +155,20 @@ def generate_image(item: dict, drafts: dict = None) -> dict:
         print("[generate_image] OPENAI_API_KEY not set — skipping image generation.")
         return None
 
-    headline_source = (drafts or {}).get("x") or item.get("title", "AI is changing fast")
-    # Trim to a clean, infographic-appropriate headline length — the raw X
-    # draft can run up to 270 chars, too long for a bold headline treatment.
+    drafts = drafts or {}
+
+    headline_source = drafts.get("image_headline") or drafts.get("x") or item.get("title", "AI is changing fast")
     headline = headline_source.strip()
     if len(headline) > 90:
         headline = headline[:87].rsplit(" ", 1)[0] + "..."
 
+    visual_concept = drafts.get("visual_concept") or (
+        "a simple, concrete visual metaphor representing AI agents at work — "
+        "favor a clear specific scene over abstract data/network imagery"
+    )
+
     palette = random.choice(INFOGRAPHIC_PALETTES)
-    prompt = _build_prompt(item, headline, palette)
+    prompt = _build_prompt(item, headline, visual_concept, palette)
 
     try:
         response = _get_client().images.generate(
