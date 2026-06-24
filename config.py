@@ -107,7 +107,12 @@ BLOCKCHAIN_KEYWORDS = [
 # ---------------------------------------------------------------------------
 # Posting limits / rate limiting
 # ---------------------------------------------------------------------------
-MAX_X_POSTS_PER_DAY = 1
+# Default is 1 (the real production target). Override via the
+# MAX_X_POSTS_PER_DAY env var while testing — e.g. set it to 10 in
+# Render's dashboard to test multiple runs in one day, then remove the
+# env var (or set it back to 1) once testing is done. No redeploy
+# needed either way since Render env var changes restart the service.
+MAX_X_POSTS_PER_DAY = int(os.getenv("MAX_X_POSTS_PER_DAY", "1"))
 MAX_X_POST_LENGTH = 280  # X's hard limit. No URL reserved — links are excluded from X posts (see safety.py).
 
 # How many days of history to check against for duplicate-content detection
