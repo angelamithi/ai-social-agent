@@ -1,88 +1,143 @@
 """
-Publishing layer for X (Twitter) using API v2 with OAuth 1.0a user context.
+Main orchestrator. Run this once daily (via Render Cron Job) to:
+  1. Pull a candidate topic (manual queue first, then RSS)
+  2. Generate platform drafts via Claude
+  3. Run safety checks on the X draft
+  4. Generate one branded image (with Afrivance.ai watermark), stored in Postgres
+  5. Save the candidate as a pending approval and send it to you on
+     WhatsApp for a manual yes/no — NOTHING posts automatically anymore.
+  6. The actual posting + LinkedIn/Facebook draft messaging happens
+     later, in webhook_server.py, once you tap Approve.
 
-Requires a developer app with "Read and write" permissions, and the four
-credentials below generated for the account you want to post as:
-  X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
+Designed to be safe to run repeatedly: if a pending approval is already
+waiting on your decision, this run skips entirely rather than piling up
+a second request — you'll never get two competing approval messages.
 
-Note on cost (as of mid-2026): X moved to pay-per-use pricing. Plain text
-posts cost ~$0.015 each; posts containing a URL cost ~$0.20 each. Check
-the X Developer Console for current rates before relying on these numbers.
-
-Media upload uses the v2 endpoint (POST /2/media/upload). The legacy
-v1.1 endpoint (upload.twitter.com/1.1/media/upload.json) was
-permanently sunset by X on June 9, 2025 and now returns an empty-body
-403 at the edge for any request — there is no fallback to it. The
-resulting media_id from the v2 upload is attached to a v2 tweet exactly
-as before.
-
-This uses a simple single-shot upload (image bytes in one request),
-which is sufficient for small images like the ones this agent
-generates. X's chunked INIT/APPEND/FINALIZE flow exists for video and
-large files but isn't needed here.
+State (history, pending approval, image bytes) lives in Postgres via
+db.py, not local files — this process and webhook_server.py run in
+separate containers on Render with no shared filesystem.
 """
 
-import requests
-from requests_oauthlib import OAuth1
+import sys
+import traceback
+from datetime import datetime
 
 import config
-
-X_POST_ENDPOINT = "https://api.x.com/2/tweets"
-X_MEDIA_UPLOAD_ENDPOINT = "https://api.x.com/2/media/upload"
-
-
-def _auth() -> OAuth1:
-    return OAuth1(
-        config.X_API_KEY,
-        config.X_API_SECRET,
-        config.X_ACCESS_TOKEN,
-        config.X_ACCESS_TOKEN_SECRET,
-    )
+import db
+import ingest
+import generate
+import generate_image
+import safety
+import whatsapp_client
 
 
-def upload_media(image_bytes: bytes) -> str:
-    """Upload image bytes to X (v2 endpoint) and return the media id.
-
-    Takes raw bytes rather than a file path — the cron job and the web
-    service that calls this don't share a local disk on Render, so
-    images are passed around as in-memory bytes (sourced from Postgres
-    via db.py), not file paths.
-
-    Raises requests.HTTPError on failure (caller should catch and log).
-    """
-    response = requests.post(
-        X_MEDIA_UPLOAD_ENDPOINT,
-        auth=_auth(),
-        data={"media_category": "tweet_image"},
-        files={"media": ("image.png", image_bytes, "image/png")},
-        timeout=30,
-    )
-    response.raise_for_status()
-    body = response.json()
-    # v2 wraps the result in a "data" envelope, unlike the old v1.1 shape.
-    return body["data"]["id"]
+def log(message: str) -> None:
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    line = f"[{timestamp}] {message}"
+    print(line)
+    with open(config.LOG_FILE, "a") as f:
+        f.write(line + "\n")
 
 
-def post_tweet(text: str, image_bytes: bytes = None) -> dict:
-    """Post a single tweet, optionally with an attached image.
+def run() -> None:
+    log("=== Daily run started ===")
 
-    If image_bytes is given, uploads it first and attaches it to the
-    tweet. If the image upload fails, raises — caller decides whether
-    to fall back to a text-only post.
+    if not config.ENABLED:
+        log("ENABLED=false in .env — kill switch is active. Exiting without posting.")
+        return
 
-    Returns the API response JSON. Raises requests.HTTPError on failure.
-    """
-    payload = {"text": text}
+    if not config.DATABASE_URL:
+        log("FATAL: DATABASE_URL is not set. Cannot proceed without the shared database. See README.")
+        return
 
-    if image_bytes:
-        media_id = upload_media(image_bytes)
-        payload["media"] = {"media_ids": [media_id]}
+    db.init_schema()
 
-    response = requests.post(
-        X_POST_ENDPOINT,
-        auth=_auth(),
-        json=payload,
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()
+    if db.has_pending():
+        log("A pending approval is already waiting on your WhatsApp decision. "
+            "Skipping this run rather than sending a second request.")
+        return
+
+    items = ingest.get_daily_items()
+    if not items:
+        log("No candidate items found (manual queue empty, no fresh relevant RSS items). Exiting.")
+        return
+
+    log(f"Found {len(items)} candidate item(s). Trying in order until one succeeds.")
+
+    for item in items:
+        title = item.get("title", "(untitled)")
+        url = item.get("url")
+        log(f"Trying item: '{title}' (source: {item['source']})")
+
+        drafts = generate.generate_drafts(item)
+        if drafts is None:
+            log(f"  Generation failed for this item, skipping.")
+            continue
+
+        x_text = drafts["x"]
+        linkedin_text = drafts["linkedin"]
+        facebook_text = drafts["facebook"]
+
+        # --- Safety gates on the X draft ---
+        result = safety.run_all_checks(
+            x_text,
+            platform="x",
+            max_len=config.MAX_X_POST_LENGTH,
+            max_per_day=config.MAX_X_POSTS_PER_DAY,
+            source_url=url,
+        )
+
+        if not result.ok:
+            log(f"  X draft BLOCKED: {result.reason}")
+            db.record_post("x", x_text, source_url=url, status="blocked")
+            log("  Trying next candidate item instead of sending a blocked draft for approval.")
+            continue
+
+        # --- Generate one branded image, reused across all three platforms ---
+        image_result = generate_image.generate_image(item, drafts=drafts)
+        image_id = image_result["image_id"] if image_result else None
+        if image_id:
+            log(f"  Image generated and stored (image_id={image_id})")
+        else:
+            log("  Image generation failed.")
+
+        if not image_id:
+            log("  No image available — cannot use the image-header approval template. "
+                "Skipping this item; trying the next one.")
+            continue
+
+        # --- Park the candidate as a pending approval (nothing posts yet) ---
+        approval_id = db.create_pending(
+            item, x_text, linkedin_text, facebook_text, image_id, source_url=url,
+        )
+        log(f"  Created pending approval (id={approval_id}). Sending to WhatsApp for review.")
+
+        if not config.PUBLIC_BASE_URL:
+            log("  FATAL: PUBLIC_BASE_URL is not set in .env — cannot build a public image URL "
+                "for the WhatsApp template. See README. Aborting this run.")
+            return
+        image_url = f"{config.PUBLIC_BASE_URL}/images/{image_id}"
+
+        caption = x_text if len(x_text) <= 200 else x_text[:197] + "..."
+
+        try:
+            whatsapp_client.send_approval_request(image_url, caption, approval_id)
+            log(f"  Approval request sent to WhatsApp. Waiting for your decision "
+                f"(no timeout — nothing posts until you respond).")
+        except Exception as e:
+            log(f"  FAILED to send WhatsApp approval request: {e}\n{traceback.format_exc()}")
+            log("  Rolling back pending approval since you were never notified.")
+            db.resolve(approval_id, "failed_to_notify")
+
+        log("=== Daily run completed — awaiting your approval ===")
+        return
+
+    log("No item succeeded through generation/safety checks. Nothing sent for approval today.")
+
+
+if __name__ == "__main__":
+    try:
+        run()
+    except Exception as e:
+        log(f"FATAL ERROR: {e}\n{traceback.format_exc()}")
+        sys.exit(1)
