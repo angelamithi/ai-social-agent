@@ -35,15 +35,56 @@ def _get_client() -> OpenAI:
         _client = OpenAI(api_key=config.OPENAI_API_KEY)
     return _client
 
-IMAGE_SYSTEM_GUIDANCE = """Create a clean, professional illustration suitable for a \
-social media post about AI, blockchain, crypto, or AI agents. Style: modern, \
-abstract/conceptual tech illustration — think editorial tech-blog header image. \
-Avoid: any real company logos, real people's faces, readable body text/numbers \
-that could be mistaken for real data, or anything resembling a chart making a \
-price claim. Avoid words/text in the image entirely unless absolutely necessary. \
-Leave the bottom ~8% of the image relatively simple/uncluttered (plain sky, \
-gradient, or open space) — a brand watermark will be added there afterward, \
-so avoid placing important subject matter right at the bottom edge.
+import random
+
+# A rotating pool of distinct visual styles — picked per-image so the
+# feed doesn't look like the same generic "blue tech gradient" every
+# single day. Each is specific enough to actually steer the model
+# toward a real visual concept instead of defaulting to stock-photo
+# abstraction.
+IMAGE_STYLE_POOL = [
+    "warm flat-design illustration with bold, friendly shapes and a limited "
+    "2-3 color palette (think modern editorial illustration, not corporate "
+    "tech-stock-photo style) — approachable and human, not sterile or cold",
+
+    "playful isometric-style illustration showing a small scene or everyday "
+    "object reimagined to represent the idea (e.g. a piggy bank, a road, a "
+    "tool, a maze) — concrete and relatable rather than abstract circuitry",
+
+    "bold, high-contrast poster-style illustration with strong shapes and "
+    "confident color blocking, like a print magazine cover — punchy and "
+    "memorable, avoid generic glowing-network or circuit-board imagery",
+
+    "warm hand-drawn / sketchbook-style illustration with visible line work "
+    "and texture, giving it a human, approachable, slightly imperfect feel "
+    "rather than a slick corporate render",
+
+    "minimalist scene-based illustration depicting a simple, everyday "
+    "metaphor for the concept (a person at a crossroads, a key unlocking "
+    "something, a small robot helper) — favor a clear visual metaphor over "
+    "abstract data/network imagery",
+]
+
+IMAGE_SYSTEM_GUIDANCE = """Create an illustration for a social media post that helps \
+ordinary, non-technical people understand a topic in AI, blockchain, crypto, or AI \
+agents. The goal is to make the topic feel approachable and human — NOT like generic \
+corporate tech stock art (avoid: glowing blue circuit boards, generic floating \
+network nodes, generic robot hands, stock-photo-style globes/grids — these are \
+overused and feel cold/impersonal).
+
+Required style for this image: {style}
+
+Find a concrete, specific visual idea tied to the actual topic below — a scene, \
+metaphor, or moment that represents what's happening, the way a good editorial \
+illustration for a newspaper explainer article would. Prefer one clear, specific idea \
+over busy abstract tech imagery.
+
+Avoid: any real company logos, real people's faces, readable body text/numbers that \
+could be mistaken for real data, or anything resembling a chart making a price claim. \
+Avoid words/text in the image entirely unless absolutely necessary. Leave the bottom \
+~8% of the image relatively simple/uncluttered (plain background, sky, or open space) \
+— a brand watermark will be added there afterward, so avoid placing important subject \
+matter right at the bottom edge.
 
 Topic: {title}
 """
@@ -100,7 +141,11 @@ def generate_image(item: dict) -> dict:
     Returns a dict {"image_id": <db.py image id>, "prompt": <prompt used>}
     or None if generation failed.
     """
-    prompt = IMAGE_SYSTEM_GUIDANCE.format(title=item.get("title", "AI and technology"))
+    style = random.choice(IMAGE_STYLE_POOL)
+    prompt = IMAGE_SYSTEM_GUIDANCE.format(
+        title=item.get("title", "AI and technology"),
+        style=style,
+    )
 
     if not config.OPENAI_API_KEY:
         print("[generate_image] OPENAI_API_KEY not set — skipping image generation.")
