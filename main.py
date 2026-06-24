@@ -57,6 +57,8 @@ def run() -> None:
             "Skipping this run rather than sending a second request.")
         return
 
+    log("Fetching candidate items (manual queue + RSS — each feed bounded to "
+        f"{ingest.RSS_FETCH_TIMEOUT_SECONDS}s timeout)...")
     items = ingest.get_daily_items()
     if not items:
         log("No candidate items found (manual queue empty, no fresh relevant RSS items). Exiting.")

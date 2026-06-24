@@ -8,7 +8,7 @@ import anthropic
 
 import config
 
-client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=60.0)
 
 SYSTEM_PROMPT = """You are writing social media posts for Afrivance.ai, a brand whose \
 mission is to educate ordinary, everyday people about AI — specifically AI agents, \
@@ -98,8 +98,24 @@ pure crypto piece. AI leads; blockchain/crypto/tokenization only ever supports.
    the most casual and friend-to-friend of the three — this is the "explain it like \
    I'm your smart friend" voice at its most relaxed.
 
+Also write two short fields used to generate an accompanying magazine-style cover \
+image (NOT the post text itself — these are separate, image-only fields):
+
+4. "image_headline": A short, punchy headline phrase (3-7 words) that captures the \
+   single biggest hook of this story — written like a bold magazine cover line, not a \
+   restated article title. Think attention-grabbing and human, e.g. "AI Agents Can Now \
+   Pay Each Other" or "Your Assistant Just Got a Wallet". No periods, no hashtags, no \
+   emoji. This will be rendered as large bold text on the image, so keep it short \
+   enough to read instantly.
+5. "visual_concept": A one-sentence description of ONE concrete visual scene or \
+   metaphor (not abstract data/network imagery) that represents this story — something \
+   an illustrator could actually draw. No real people, no brand logos, no specific \
+   numbers or stats. E.g. "A small robot handing a glowing coin to another robot \
+   across a table" or "A single AI agent icon standing at a crossroads with a glowing \
+   path leading toward a bank vault."
+
 Return JSON exactly in this shape:
-{{"x": "...", "linkedin": "...", "facebook": "..."}}
+{{"x": "...", "linkedin": "...", "facebook": "...", "image_headline": "...", "visual_concept": "..."}}
 """
 
 
@@ -142,7 +158,7 @@ def generate_drafts(item: dict) -> dict:
         print(f"[generate] Failed to parse Claude response as JSON: {e}\nRaw: {raw_text[:300]}")
         return None
 
-    for key in ("x", "linkedin", "facebook"):
+    for key in ("x", "linkedin", "facebook", "image_headline", "visual_concept"):
         if key not in drafts or not isinstance(drafts[key], str):
             print(f"[generate] Missing or invalid '{key}' field in response")
             return None

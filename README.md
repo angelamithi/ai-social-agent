@@ -44,6 +44,16 @@ pip install -r requirements.txt
 cp .env.example .env   # for local testing only — Render deploy uses its own env var UI
 ```
 
+### Getting an Anthropic API key (for text generation — required)
+
+This is what actually writes the post drafts. `generate.py` calls the Claude API once per topic to produce the X, LinkedIn, and Facebook text in a single request — it's the core "agent" part of this agent; without it, there's no post content to review or publish.
+
+1. Create an account and a key at [console.anthropic.com](https://console.anthropic.com) — click **Get API key** / **API Keys** in the left sidebar, then **Create Key**.
+2. This is a separate product from a normal Claude.ai subscription — a Claude.ai Pro/Max plan does **not** give you API access or an API key. The API is pay-as-you-go, billed by usage (tokens in/out), not a flat subscription.
+3. Add a payment method under **Billing** in the console — new accounts typically need to load a small amount of credit before the key will work (a few dollars is enough to cover a very long time at 1 post/day; this task uses a trivial number of tokens per run).
+4. Copy the key (starts with `sk-ant-...`) into `ANTHROPIC_API_KEY` in `.env` (or the Render env var UI). Keys are only shown once at creation — store it somewhere safe, you'll need to generate a new one if you lose it.
+5. The model used is set in `config.py` as `CLAUDE_MODEL` (currently `claude-sonnet-4-6`) — no need to touch this unless you want to swap models later.
+
 ### Getting X API credentials
 
 Apply at [developer.x.com](https://developer.x.com), create an app with **Read and write** permissions, generate Consumer Keys + Access Token/Secret *after* setting that permission level. Add billing/credits in the Developer Console — X uses pay-per-use pricing with no free tier as of 2026.

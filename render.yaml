@@ -88,5 +88,7 @@ envVarGroups:
         sync: false
       - key: WHATSAPP_APPROVAL_TEMPLATE_NAME
         value: post_approval_request
+      - key: WHATSAPP_BODY_PARAM_NAME
+        value: post_summary
       - key: PUBLIC_BASE_URL
         sync: false

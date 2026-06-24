@@ -1,0 +1,20 @@
+# Real secrets — never commit this. .env.example is the template that
+# IS meant to be committed; .env (no extension suffix) is your actual
+# local secrets file and must never leave your machine.
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+
+# Local run artifacts (not used once deployed to Render, but harmless
+# to exclude even for local testing)
+run_log.txt
+
+# Common editor/OS noise
+.DS_Store
+.vscode/
+.idea/

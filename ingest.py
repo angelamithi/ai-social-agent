@@ -5,10 +5,19 @@ topic queue. Returns a unified list of "items" for the generation layer.
 
 import os
 import feedparser
+import requests
 from datetime import datetime, timedelta, timezone
 
 import config
 import db
+
+# feedparser.parse() given a bare URL has NO timeout (it delegates to
+# urllib, which blocks indefinitely on a slow/unresponsive server). A
+# single bad feed could previously hang the entire daily run with zero
+# log output. Fetch with requests (explicit timeout) first, then hand
+# the raw bytes to feedparser to parse — this bounds the worst case to
+# RSS_FETCH_TIMEOUT_SECONDS per feed instead of indefinite.
+RSS_FETCH_TIMEOUT_SECONDS = 10
 
 
 def fetch_rss_items(max_per_feed: int = 10) -> list:
@@ -18,7 +27,16 @@ def fetch_rss_items(max_per_feed: int = 10) -> list:
 
     for feed_url in config.RSS_SOURCES:
         try:
-            feed = feedparser.parse(feed_url)
+            response = requests.get(
+                feed_url,
+                timeout=RSS_FETCH_TIMEOUT_SECONDS,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; AfrivanceAgent/1.0)"},
+            )
+            response.raise_for_status()
+            feed = feedparser.parse(response.content)
+        except requests.exceptions.Timeout:
+            print(f"[ingest] Timed out after {RSS_FETCH_TIMEOUT_SECONDS}s fetching {feed_url}, skipping.")
+            continue
         except Exception as e:
             print(f"[ingest] Failed to fetch {feed_url}: {e}")
             continue
