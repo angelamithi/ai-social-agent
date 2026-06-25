@@ -63,6 +63,29 @@ CREATE TABLE IF NOT EXISTS pending_approval (
     whatsapp_message_id TEXT,
     CONSTRAINT single_row CHECK (id = 1)
 );
+
+-- Stage-1 approval: up to 3 candidate drafts (either from RSS-sourced
+-- topics, or from a topic you texted the agent) awaiting your pick of
+-- which one to actually turn into a real post. Single-row table, same
+-- pattern as pending_approval — only one selection can be in flight at
+-- a time. Stores the three full draft sets as JSON since the shape
+-- (x/linkedin/facebook/image_headline/visual_concept) matches what
+-- generate.py already produces.
+CREATE TABLE IF NOT EXISTS pending_selection (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    selection_id TEXT,
+    status TEXT,
+    source TEXT,
+    created_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ,
+    item_title TEXT,
+    source_url TEXT,
+    option_1 JSONB,
+    option_2 JSONB,
+    option_3 JSONB,
+    chosen_option INTEGER,
+    CONSTRAINT single_row_selection CHECK (id = 1)
+);
 """
 
 
@@ -281,3 +304,95 @@ def set_whatsapp_message_id(approval_id: str, message_id: str) -> None:
                 "UPDATE pending_approval SET whatsapp_message_id = %s WHERE id = 1 AND approval_id = %s",
                 (message_id, approval_id),
             )
+
+
+# ---------------------------------------------------------------------------
+# Stage-1 draft selection (3 options awaiting your pick of which one to
+# actually turn into a real post). Single-row table, same pattern as
+# pending_approval above. Used by both flows:
+#   - Flow A (autonomous): cron job generates 3 options from an RSS topic
+#   - Flow B (you-initiated): you text the agent a topic on WhatsApp
+# ---------------------------------------------------------------------------
+
+def has_pending_selection() -> bool:
+    with _connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM pending_selection WHERE id = 1")
+            row = cur.fetchone()
+            return row is not None and row[0] == "pending"
+
+
+def create_pending_selection(item: dict, options: list, source: str, source_url: str = None) -> str:
+    """`options` must be a list of exactly 3 draft dicts (each shaped like
+    generate.generate_drafts()'s return value). `source` is "rss" or
+    "manual" (cron-found topic) or "whatsapp" (you texted a topic)."""
+    selection_id = uuid.uuid4().hex[:12]
+    now = datetime.now(timezone.utc)
+    with _connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO pending_selection
+                    (id, selection_id, status, source, created_at, resolved_at,
+                     item_title, source_url, option_1, option_2, option_3, chosen_option)
+                VALUES (1, %s, 'pending', %s, %s, NULL, %s, %s, %s, %s, %s, NULL)
+                ON CONFLICT (id) DO UPDATE SET
+                    selection_id = EXCLUDED.selection_id,
+                    status = EXCLUDED.status,
+                    source = EXCLUDED.source,
+                    created_at = EXCLUDED.created_at,
+                    resolved_at = NULL,
+                    item_title = EXCLUDED.item_title,
+                    source_url = EXCLUDED.source_url,
+                    option_1 = EXCLUDED.option_1,
+                    option_2 = EXCLUDED.option_2,
+                    option_3 = EXCLUDED.option_3,
+                    chosen_option = NULL
+                """,
+                (selection_id, source, now, item.get("title", ""), source_url,
+                 psycopg2.extras.Json(options[0]), psycopg2.extras.Json(options[1]),
+                 psycopg2.extras.Json(options[2])),
+            )
+    return selection_id
+
+
+def _selection_row_to_dict(row) -> dict:
+    if row is None:
+        return None
+    columns = ["selection_id", "status", "source", "created_at", "resolved_at",
+               "item_title", "source_url", "option_1", "option_2", "option_3",
+               "chosen_option"]
+    return dict(zip(columns, row))
+
+
+def get_pending_selection() -> dict:
+    with _connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT selection_id, status, source, created_at, resolved_at,
+                          item_title, source_url, option_1, option_2, option_3,
+                          chosen_option
+                   FROM pending_selection WHERE id = 1 AND status = 'pending'"""
+            )
+            return _selection_row_to_dict(cur.fetchone())
+
+
+def resolve_selection(selection_id: str, decision: str, chosen_option: int = None) -> dict:
+    """Mark the pending selection as 'chosen'/'expired_auto_chosen'/etc.
+    Returns the resolved entry, or None if selection_id didn't match the
+    current pending entry (stale/duplicate webhook delivery)."""
+    now = datetime.now(timezone.utc)
+    with _connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE pending_selection
+                SET status = %s, resolved_at = %s, chosen_option = %s
+                WHERE id = 1 AND selection_id = %s AND status = 'pending'
+                RETURNING selection_id, status, source, created_at, resolved_at,
+                          item_title, source_url, option_1, option_2, option_3,
+                          chosen_option
+                """,
+                (decision, now, chosen_option, selection_id),
+            )
+            return _selection_row_to_dict(cur.fetchone())

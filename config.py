@@ -44,6 +44,16 @@ WHATSAPP_TEMPLATE_LANGUAGE = "en"
 # WhatsApp Manager (Meta's newer template builder requires named, not
 # numbered, placeholders — lowercase letters/numbers/underscores only).
 WHATSAPP_BODY_PARAM_NAME = os.getenv("WHATSAPP_BODY_PARAM_NAME", "post_summary")
+# Name of the second WhatsApp template used for stage-1 (topic/draft
+# selection) approval — shows 3 short previews with 3 quick-reply
+# buttons ("Option 1"/"Option 2"/"Option 3"). Must be created and
+# approved in WhatsApp Manager separately — see README.
+WHATSAPP_OPTIONS_TEMPLATE_NAME = os.getenv("WHATSAPP_OPTIONS_TEMPLATE_NAME", "draft_options_request")
+# How long to wait for you to pick one of the 3 draft options before
+# auto-selecting option 1. The final post-approval step (image + Approve/
+# Reject) still waits indefinitely — this timeout is only for the
+# earlier topic/draft-selection stage.
+SELECTION_TIMEOUT_HOURS = int(os.getenv("SELECTION_TIMEOUT_HOURS", "8"))
 # Public base URL this server is reachable at (e.g. https://yourapp.onrender.com
 # or an ngrok URL during local testing) — used to build the image URL Meta
 # needs to fetch for the template header, since WhatsApp template media

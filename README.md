@@ -1,38 +1,49 @@
 # AI Social Agent
 
-A daily content agent that:
-- Pulls fresh stories on AI, blockchain, crypto, and AI agents from RSS feeds, plus any topics you add manually.
-- Generates platform-specific drafts (X, LinkedIn, Facebook) using the Claude API.
-- Generates one AI image per topic (via OpenAI's GPT Image models), stamped with an **Afrivance.ai** watermark in the footer, reused across all three platforms.
-- Runs automated safety checks (blocklist, no financial advice, no links in X posts, dedup, rate limit).
-- **Sends the article + image to you on WhatsApp for manual approval** — nothing posts to any platform until you tap Approve.
+A content agent for Afrivance.ai that:
+- Finds topics two ways: automatically from RSS feeds (AI is the main focus; blockchain/crypto only as a subtopic), or from a topic you text it directly on WhatsApp, any time.
+- For each topic, generates **3 genuinely distinct draft options** (different angles — a bold claim, a question, a relatable scenario) using the Claude API.
+- **Stage 1:** sends you the 3 options on WhatsApp (short previews + angle labels) for you to pick one — auto-picks option 1 if you don't respond within `SELECTION_TIMEOUT_HOURS` (default 8h).
+- Once a topic/draft is picked, generates one AI infographic-style image (via OpenAI's GPT Image models) for that option, stamped with an **Afrivance.ai** watermark.
+- **Stage 2:** sends you the image + final post text on WhatsApp for a final Approve/Reject — this stage has **no timeout**, it waits indefinitely.
 - On approval: posts to X (with image) and sends you the LinkedIn/Facebook drafts as a WhatsApp text message.
 - On rejection: discards the post, nothing goes out anywhere.
+- Runs automated safety checks on every option (blocklist, no financial advice, no links in X posts, dedup, rate limit) before it's ever shown to you.
 - Logs every run and decision; tracks post history and dedup in Postgres.
 
-**There is no auto-post path.** Every single post — X included — waits indefinitely for your WhatsApp approval. There's no timeout and no fallback that publishes without you.
+**Nothing posts without you tapping Approve at stage 2.** Stage 1 (picking which topic/angle) has an 8-hour auto-pick fallback by design, since it's just choosing a starting point, not publishing anything — but the final stage-2 post approval always waits indefinitely with no fallback that publishes without you.
 
 ## Architecture
 
 This runs as **three pieces on Render**, defined together in `render.yaml`:
 
-1. **`agent-daily-run`** (Render Cron Job) — runs `main.py` once a day. Generates content + image, runs safety checks, and sends you the WhatsApp approval request. Exits immediately after sending.
-2. **`agent-webhook`** (Render Web Service, FastAPI) — runs `webhook_server.py`, always-on. Listens for your button tap (Approve/Reject) and finishes the job: posts to X and sends you the LinkedIn/Facebook drafts via WhatsApp text.
-3. **`agent-db`** (Render Postgres) — shared database both services read/write. This exists because the cron job and the web service run in **separate containers with separate filesystems** on Render — they can't share local files, so all state (post history, the pending approval, and even the generated image bytes) lives in Postgres instead of on disk.
+1. **`agent-daily-run`** (Render Cron Job) — runs `main.py` once a day. Handles **Flow A only**: picks an RSS-sourced topic, generates 3 draft options, runs safety checks on each, and sends the stage-1 selection request to WhatsApp. Exits immediately after sending. Does **not** generate any image — that happens later, in the web service, after a pick is made.
+2. **`agent-webhook`** (Render Web Service, FastAPI) — runs `webhook_server.py`, always-on. This is where most of the real work happens now:
+   - Handles **Flow B**: any inbound WhatsApp text message (when nothing's pending) is treated as a new topic — generates 3 options and sends the same stage-1 selection request.
+   - Handles your **stage-1 pick** (Option 1/2/3 button tap): generates the image for your chosen option, then sends the stage-2 final-approval request.
+   - Handles your **stage-2 decision** (Approve/Reject): posts to X and sends LinkedIn/Facebook drafts, or discards.
+   - Runs a background scheduler (checks every 15 minutes) that auto-picks option 1 if a stage-1 selection has been pending longer than `SELECTION_TIMEOUT_HOURS`.
+3. **`agent-db`** (Render Postgres) — shared database both services read/write. This exists because the cron job and the web service run in **separate containers with separate filesystems** on Render — they can't share local files, so all state (post history, pending selections, pending approvals, and generated image bytes) lives in Postgres instead of on disk.
 
 ```
-Daily cron job (main.py)              Always-on web service (webhook_server.py)
+Cron job (main.py) — Flow A only       Always-on web service (webhook_server.py)
         │                                          │
-        ├─ generate text + image ──────┐           │
-        ├─ run safety checks           │           │
-        ├─ save to Postgres ───────────┼──► agent-db (Postgres) ◄──┤
-        ├─ send WhatsApp approval req  │           │  - history          │
-        └─ exit                        │           │  - pending_approval │
-                                        │           │  - images (bytes)  │
-                                                     ├─ receive your button tap
-                                                     ├─ read pending item from DB
-                                                     ├─ post to X (if approved)
-                                                     └─ send LinkedIn/FB drafts via WhatsApp
+        ├─ find RSS topic                          ├─ Flow B: handle inbound text
+        ├─ generate 3 draft options                │    → generate 3 draft options
+        ├─ run safety checks per option             │    → send stage-1 request
+        ├─ save to pending_selection ───┐           │
+        ├─ send stage-1 WhatsApp req    │           ├─ handle stage-1 pick (button or timeout)
+        └─ exit                        │           │    → generate image for chosen option
+                                        │           │    → save to pending_approval
+                                        ▼           │    → send stage-2 WhatsApp req
+                                  agent-db (Postgres)│
+                                  - history          ├─ handle stage-2 decision (button)
+                                  - pending_selection │    → post to X (if approved)
+                                  - pending_approval  │    → send LinkedIn/FB drafts
+                                  - images (bytes)   │
+                                        ▲             ├─ background scheduler (every 15 min)
+                                        └─────────────┘    → auto-pick option 1 if stage-1
+                                                              has been pending > timeout
 ```
 
 ## 1. Setup
@@ -113,21 +124,61 @@ Render's free web services spin down after 15 minutes with no incoming traffic, 
 
 Locally, with `ENABLED=false` in `.env`, `main.py` exits immediately without calling any API. On Render, you can trigger the cron job manually from the dashboard ("Trigger Run") to test without waiting for the schedule.
 
-## 3. The approval flow, step by step
+## 3. The two-stage approval flow, step by step
 
+As of the latest update, there are now **two separate approval gates**, and **two ways a topic can enter the pipeline**:
+
+**Flow A — autonomous (RSS-sourced):**
 1. The Render cron job runs `main.py` once a day.
-2. It generates the X/LinkedIn/Facebook drafts and one watermarked image (stored in Postgres), and runs safety checks on the X draft.
-3. If safety checks fail, it tries the next candidate topic — a blocked draft never reaches you for approval.
-4. If a candidate passes, it's saved to the `pending_approval` table and a WhatsApp template message goes out: the image, a caption, and **Approve**/**Reject** buttons.
-5. `main.py` exits. Nothing has posted anywhere yet.
-6. Whenever you tap a button — five minutes later or five days later, no timeout — Meta sends a webhook event to `agent-webhook`.
-7. **Approve** → posts to X (with the image attached) and sends you the LinkedIn/Facebook drafts as a WhatsApp message. You get a confirmation.
-8. **Reject** → nothing posts anywhere. You get a WhatsApp confirmation that it was discarded.
-9. While a request is pending, the next day's cron run won't send a second one — it skips and tries again the following day.
+2. It picks a candidate topic (manual queue first, then RSS) and asks Claude for **3 genuinely distinct draft options** (not just one) — varied angles, e.g. a bold claim, a question, a relatable scenario.
+3. Each option's X draft goes through safety checks individually; if any of the 3 fails, that whole candidate topic is skipped and the next one is tried (you always get a clean set of exactly 3 to choose from, never a partial/blocked set).
+4. The 3 surviving options are saved to `pending_selection` and sent to WhatsApp as **stage-1**: one template message showing a short preview + angle label for each option, with three buttons — **Option 1 / Option 2 / Option 3**.
+5. `main.py` exits. Nothing has been generated as an image or posted yet.
+
+**Flow B — you-initiated (text the agent a topic):**
+1. Send the agent any WhatsApp message containing a topic, any time — e.g. *"How do AI agents actually decide what to do next?"*
+2. **You can include a URL** (a news article, a shortener/redirect link, etc.) right in the same message — e.g. *"Tech giant Oracle cuts 21,000 jobs as it embraces AI https://share.google/abc123"*. The agent (`url_extract.py`) fetches the link, follows any redirects to the real article, and extracts the clean article text (stripping nav/ads/footers) using `trafilatura`. That real article text becomes the source material Claude writes from — not a guess based on the headline alone.
+3. If extraction fails (paywall, bot-blocked page, or a shortener that uses a JavaScript-only redirect rather than a standard HTTP one — `trafilatura`/`requests` don't execute JavaScript), the agent falls back to the headline text alone and explicitly tells Claude not to invent specific facts, figures, or quotes it can't verify, rather than silently hallucinating article details.
+4. As long as nothing is currently pending, `webhook_server.py` treats this as a new topic, generates 3 options the same way as Flow A, and sends you the same stage-1 selection message.
+5. If something *is* already pending, your message is just logged and ignored as chatter — use the buttons to act on what's already pending first.
+
+**Both flows converge here — stage 1 → stage 2:**
+6. Whenever you tap **Option 1/2/3** — or if **`SELECTION_TIMEOUT_HOURS`** (default 8) passes with no response, in which case option 1 is auto-picked — the webhook generates one watermarked image for your chosen option only.
+7. That becomes a new `pending_approval` entry, and the existing **stage-2** message goes out: the image, a caption, and **Approve**/**Reject** buttons. This stage has **no timeout** — it waits indefinitely, exactly as before.
+8. **Approve** → posts to X (with the image attached) and sends you the LinkedIn/Facebook drafts as a WhatsApp message.
+9. **Reject** → nothing posts anywhere. You get a confirmation that it was discarded.
+10. While either stage is pending, the next cron run won't send a competing request — it skips and tries again later. (Flow B requests aren't affected by the cron schedule at all — you can text a topic any time, as long as nothing's currently pending.)
+
+### Setting up the second WhatsApp template
+
+Stage 1 needs its own approved template, separate from the stage-2 one:
+- **Name:** `draft_options_request` (or set `WHATSAPP_OPTIONS_TEMPLATE_NAME` to whatever you use)
+- **Category:** Utility
+- **Language:** must match `WHATSAPP_TEMPLATE_LANGUAGE` exactly (check via the API if unsure — see the note on `en` vs `en_US` elsewhere in this file)
+- **Header:** none needed
+- **Body**, using exactly 3 named variables — **not** one variable per field. An earlier version with 7 separate variables (topic title + angle + preview × 3) was rejected by Meta with *"This template contains too many variables for its length. Reduce the number of variables or increase the message length"* — WhatsApp checks the ratio of variables to fixed text, so each option's angle label and preview are combined into one variable here:
+  ```
+  New draft options are ready for your review!
+
+  1️⃣ {{option_1}}
+
+  2️⃣ {{option_2}}
+
+  3️⃣ {{option_3}}
+
+  Tap a button below to pick the one you like best.
+  ```
+- **Buttons:** three Quick Reply buttons — "Option 1", "Option 2", "Option 3"
+
+When sent, each `{{option_N}}` variable is filled with a combined string like `"Bold claim — AI agents can now pay each other in crypto without..."` (angle label + a truncated preview of the X draft, joined with an em dash) — so the fixed template text plus the variable content together still convey the full picture, just packed into 3 variables instead of 7.
+
+If you still hit a variables-too-many error after this, the fix is the same in either direction: add more fixed/surrounding text to the body, or further reduce the variable count (e.g. drop to a single combined variable holding all 3 previews, newline-separated) — see `whatsapp_client.py`'s `send_options_request()` docstring for where to adjust if you change the template shape.
+
+Submit and wait for approval (same process as the first template) before this flow will work end to end.
 
 ## 4. The kill switch
 
-Set `ENABLED=false` in the cron job's environment variables (Render dashboard) to stop `main.py` from generating or sending new approval requests. This does **not** stop `agent-webhook` from processing a decision on an *already-sent* approval request — if something is already in your WhatsApp awaiting a decision, tapping Approve/Reject still works even with the kill switch on. The kill switch only stops new candidates from being generated and sent.
+Set `ENABLED=false` in the cron job's environment variables (Render dashboard) to stop `main.py` (Flow A only) from generating or sending new requests. This does **not** stop Flow B (texting a topic) or stop `agent-webhook` from processing a decision on anything *already pending* — those keep working even with the kill switch on. The kill switch only stops the cron job from starting new Flow A candidates.
 
 ## 5. Tuning
 
@@ -136,6 +187,7 @@ All the knobs live in `config.py`:
 - `BLOCKLIST_KEYWORDS` / `FINANCIAL_ADVICE_PATTERNS` — safety gates
 - `MAX_X_POSTS_PER_DAY`, `MAX_X_POST_LENGTH` — rate/length limits
 - `DEDUP_LOOKBACK_DAYS` — how far back to check for repeat content
+- `SELECTION_TIMEOUT_HOURS` — how long to wait for a stage-1 topic/draft pick before auto-choosing option 1
 - `IMAGE_MODEL` / `IMAGE_QUALITY` — image generation cost/quality tradeoff
 - `BRAND_NAME` — the watermark text stamped on every image (default: `Afrivance.ai`)
 
@@ -146,16 +198,18 @@ The cron schedule lives in `render.yaml` (`schedule:` field under `agent-daily-r
 Everything that used to be local files now lives in Postgres (`agent-db`), accessed through `db.py`:
 - **`history`** table — decided-post history (posted/rejected/blocked), used for dedup and rate limiting.
 - **`images`** table — generated image bytes, served back out by `agent-webhook` at `/images/{image_id}` so Meta can fetch them for the WhatsApp template.
-- **`pending_approval`** table — the single in-flight item awaiting your WhatsApp decision (a one-row table; a new candidate overwrites it once the previous one is resolved).
+- **`pending_selection`** table — the stage-1 in-flight item: 3 draft options awaiting your pick (a one-row table; a new selection overwrites it once the previous one is resolved). Tracks `source` (`rss`/`manual`/`whatsapp`) so you can tell Flow A from Flow B in the data if needed.
+- **`pending_approval`** table — the stage-2 in-flight item awaiting your final Approve/Reject (same one-row pattern).
 
 `run_log.txt` is the only thing still written locally, and it's per-service (the cron job and the web service each have their own copy, not shared) — treat it as a debugging convenience. Render's own dashboard logs capture the same stdout output regardless and persist across deploys, so that's the more reliable place to check history of what happened.
 
 ## Known limitations / things to watch
 
 - **Render's free web service tier will delay your approval taps.** Use the starter/paid plan for `agent-webhook` (see above) unless you're fine with occasional 30s–2min delays.
-- **One pending approval at a time.** If you don't respond for several days, no new candidates get generated in the meantime — clear the pending one (approve or reject) to resume the daily flow.
-- **Template approval is a one-time but real dependency.** You cannot send the very first approval request until Meta approves the `post_approval_request` template.
+- **One selection and one approval at a time, each.** If you don't respond to a stage-1 selection, no new Flow A candidates get generated in the meantime (stage-1 auto-resolves after `SELECTION_TIMEOUT_HOURS` though, so this self-clears). If you don't respond to a stage-2 approval, that one waits indefinitely with no auto-clear — clear it manually (approve or reject) to unblock the next run.
+- **Two WhatsApp templates required, not one.** `post_approval_request` (stage 2) and `draft_options_request` (stage 1) both need separate Meta approval before the full flow works end to end.
 - **Images are not safety-checked the way text is.** The generation prompt steers away from logos, real faces, and chart-like imagery, but the real backstop is you, reviewing the image on WhatsApp before approving.
 - **X posts contain no links, by design.** X charges substantially more per post containing a URL (~13x the plain-text rate as of 2026). `safety.py` enforces this with a backstop check even if Claude's draft includes one by mistake.
 - **No retry/backoff on transient API failures.** If Claude, OpenAI, or X's API has a momentary outage, that step fails and gets logged; a failure mid-approval (e.g. X is down right when you tap Approve) gets reported back to you on WhatsApp rather than silently disappearing.
 - **Free Postgres tier limits.** Render's free Postgres tier has a storage cap and (depending on current Render policy) may expire after a fixed period of inactivity or age — fine for this project's tiny data volume, but worth checking Render's current free-tier database policy if you're relying on this long-term.
+- **Flow B has no topic validation beyond what Claude itself applies.** If you text something with genuinely no AI angle, Claude will say so (and you'll get a WhatsApp message explaining why) rather than silently failing.

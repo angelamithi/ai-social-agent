@@ -106,6 +106,78 @@ def send_approval_request(image_url: str, caption_text: str, approval_id: str) -
     return response.json()
 
 
+def send_options_request(item_title: str, options: list, selection_id: str) -> dict:
+    """Send the stage-1 draft-selection template: 3 short previews (each
+    combining the option's angle_label and a truncated X draft into one
+    formatted line) with 3 quick-reply buttons ("Option 1"/"Option 2"/
+    "Option 3").
+
+    Uses exactly 3 template variables (one combined string per option),
+    not one variable per field — WhatsApp template review rejects
+    templates with too many variables relative to body length ("This
+    template contains too many variables for its length"), which an
+    earlier version with 7 separate variables (topic title + angle +
+    preview x3) ran into.
+
+    `options` must be a list of exactly 3 draft dicts (from
+    generate.generate_draft_options), each with "x" and "angle_label".
+
+    The button payloads are encoded as "pick:<selection_id>:<option_number>"
+    so the webhook can identify both the selection batch and which
+    option was chosen.
+
+    Returns the API response JSON. Raises requests.HTTPError on failure.
+    """
+    def _option_line(option: dict, max_len: int = 100) -> str:
+        angle = option.get("angle_label", "Option").strip()
+        text = option.get("x", "").strip()
+        if len(text) > max_len:
+            text = text[:max_len - 3].rsplit(" ", 1)[0] + "..."
+        return f"{angle} — {text}"
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": config.APPROVER_PHONE_NUMBER,
+        "type": "template",
+        "template": {
+            "name": config.WHATSAPP_OPTIONS_TEMPLATE_NAME,
+            "language": {"code": config.WHATSAPP_TEMPLATE_LANGUAGE},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": _option_line(options[0]), "parameter_name": "option_1"},
+                        {"type": "text", "text": _option_line(options[1]), "parameter_name": "option_2"},
+                        {"type": "text", "text": _option_line(options[2]), "parameter_name": "option_3"},
+                    ],
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": 0,
+                    "parameters": [{"type": "payload", "payload": f"pick:{selection_id}:1"}],
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": 1,
+                    "parameters": [{"type": "payload", "payload": f"pick:{selection_id}:2"}],
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": 2,
+                    "parameters": [{"type": "payload", "payload": f"pick:{selection_id}:3"}],
+                },
+            ],
+        },
+    }
+
+    response = requests.post(_messages_url(), headers=_headers(), json=payload, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
 def send_text(text: str) -> dict:
     """Send a plain session-message (only works within an active 24h
     window, e.g. right after the person has just replied to a button).

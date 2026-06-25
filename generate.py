@@ -139,6 +139,132 @@ Return JSON exactly in this shape:
 """
 
 
+OPTIONS_PROMPT_TEMPLATE = """Topic/source item:
+Title: {title}
+Summary: {summary}
+URL: {url}
+
+Before writing: confirm there's a real reason this story belongs on an AI-education \
+account. Two things qualify:
+(a) The story is directly about AI/AI agents — how they work, what they're doing, \
+    what it means for people.
+(b) A known AI company (OpenAI, Anthropic, Google DeepMind, Meta AI, etc.) is a \
+    meaningful, named participant — e.g. funding something, partnering on something, \
+    launching something — even if the subject matter itself (health research, \
+    hardware, policy) isn't AI technology per se. In this case, frame the post \
+    honestly as "here's something AI company X is doing, and here's why that's \
+    interesting coming from a company built on AI" — be upfront that the news ITSELF \
+    isn't an AI breakthrough, while still making it a worthwhile read.
+
+If this story is fundamentally a crypto-market or blockchain-technology story with no \
+genuine AI angle and no AI company involvement either, find the most honest \
+AI-adjacent framing available rather than writing it as a pure crypto piece. AI \
+leads; blockchain/crypto/tokenization only ever supports.
+
+Only skip if NEITHER (a) NOR (b) applies at all. In that rare case, do NOT force it \
+and do NOT write prose explaining why. Instead return EXACTLY this JSON shape, with \
+skip=true and nothing else:
+{{"skip": true, "skip_reason": "<one short sentence explaining why>"}}
+
+Otherwise, write THREE genuinely distinct takes on this same underlying topic — not \
+three minor rewordings of the same angle. Vary the actual approach across the three, \
+for example: one could lead with a question, one with a bold claim, one with a small \
+relatable scenario; or each could emphasize a different facet of why this matters. \
+The reader should be able to tell these are different angles, not the same post \
+reworded three times.
+
+For EACH of the 3 options, write the full set of fields below (so this returns 3 \
+complete draft sets):
+
+1. "x": Twitter/X style. Conversational and punchy, 200-270 characters. No URL or \
+   link, no "link in bio"/"source:". No hashtag spam (0-2 max, only if they add \
+   something).
+2. "linkedin": Warm and plain-spoken, not corporate. 4-6 short paragraphs. Open with \
+   a hook or question. No URL needed inline.
+3. "facebook": Conversational, medium length, the most casual/friend-to-friend of \
+   the three.
+4. "image_headline": A short, punchy headline phrase (3-7 words), magazine-cover \
+   style. No periods, hashtags, or emoji.
+5. "visual_concept": One sentence describing ONE concrete visual scene/metaphor — \
+   something an illustrator could draw. No real people, no logos, no specific \
+   numbers.
+6. "angle_label": A 2-4 word label describing THIS option's distinct angle, used only \
+   to help a human pick between options (e.g. "Skeptical take", "Relatable scenario", \
+   "Bold claim opener") — not shown in the actual post.
+
+Return JSON exactly in this shape — an array of exactly 3 complete option objects:
+{{"options": [
+  {{"x": "...", "linkedin": "...", "facebook": "...", "image_headline": "...", "visual_concept": "...", "angle_label": "..."}},
+  {{"x": "...", "linkedin": "...", "facebook": "...", "image_headline": "...", "visual_concept": "...", "angle_label": "..."}},
+  {{"x": "...", "linkedin": "...", "facebook": "...", "image_headline": "...", "visual_concept": "...", "angle_label": "..."}}
+]}}
+"""
+
+
+def generate_draft_options(item: dict) -> list:
+    """Call Claude once to generate 3 genuinely distinct draft option sets
+    for the same topic, for stage-1 (topic/draft selection) approval.
+
+    Returns a list of exactly 3 dicts (each shaped like generate_drafts()'s
+    return value, plus "angle_label"), or None if generation failed,
+    Claude chose to skip, or the response was malformed.
+    """
+    prompt = OPTIONS_PROMPT_TEMPLATE.format(
+        title=item.get("title", ""),
+        summary=item.get("summary", "") or "(no summary provided)",
+        url=item.get("url") or "(none)",
+    )
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=3000,  # 3x the content of a single draft, plus angle_label
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        print(f"[generate] Claude API call failed (options): {e}")
+        return None
+
+    raw_text = "".join(
+        block.text for block in response.content if block.type == "text"
+    ).strip()
+
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.lower().startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        print(f"[generate] Failed to parse Claude options response as JSON: {e}\nRaw: {raw_text[:300]}")
+        return None
+
+    if isinstance(parsed, dict) and parsed.get("skip") is True:
+        reason = parsed.get("skip_reason", "no reason given")
+        print(f"[generate] Claude skipped this item — no genuine AI angle: {reason}")
+        return None
+
+    if not isinstance(parsed, dict) or "options" not in parsed:
+        print(f"[generate] Response missing 'options' key: {raw_text[:300]}")
+        return None
+
+    options = parsed["options"]
+    if not isinstance(options, list) or len(options) != 3:
+        print(f"[generate] Expected exactly 3 options, got: {len(options) if isinstance(options, list) else 'not a list'}")
+        return None
+
+    required_keys = ("x", "linkedin", "facebook", "image_headline", "visual_concept", "angle_label")
+    for i, option in enumerate(options):
+        for key in required_keys:
+            if key not in option or not isinstance(option[key], str):
+                print(f"[generate] Option {i+1} missing or invalid '{key}' field")
+                return None
+
+    return options
+
+
 def generate_drafts(item: dict) -> dict:
     """Call Claude to generate platform drafts for a single content item.
 

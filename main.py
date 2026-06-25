@@ -1,21 +1,30 @@
 """
 Main orchestrator. Run this once daily (via Render Cron Job) to:
   1. Pull a candidate topic (manual queue first, then RSS)
-  2. Generate platform drafts via Claude
-  3. Run safety checks on the X draft
-  4. Generate one branded image (with Afrivance.ai watermark), stored in Postgres
-  5. Save the candidate as a pending approval and send it to you on
-     WhatsApp for a manual yes/no — NOTHING posts automatically anymore.
-  6. The actual posting + LinkedIn/Facebook draft messaging happens
-     later, in webhook_server.py, once you tap Approve.
+  2. Generate 3 distinct draft OPTIONS via Claude (not a single draft)
+  3. Run safety checks on each option's X draft; drop any that fail
+  4. Send the surviving options to WhatsApp as a stage-1 selection
+     request (3 short previews + 3 buttons) — NOTHING is generated as
+     an image or posted yet.
+  5. Once you pick an option (or 8 hours pass and option 1 auto-wins —
+     see config.SELECTION_TIMEOUT_HOURS), webhook_server.py generates
+     the image for your chosen option and sends the existing stage-2
+     final-approval request (image + Approve/Reject).
 
-Designed to be safe to run repeatedly: if a pending approval is already
-waiting on your decision, this run skips entirely rather than piling up
-a second request — you'll never get two competing approval messages.
+This is "Flow A" — the autonomous, RSS-sourced path. "Flow B" (you
+texting the agent a topic directly on WhatsApp) is handled entirely in
+webhook_server.py, since it's triggered by an inbound message, not by
+this scheduled cron job — but it shares the exact same stage-1/stage-2
+pipeline and the same generate.generate_draft_options() function.
 
-State (history, pending approval, image bytes) lives in Postgres via
-db.py, not local files — this process and webhook_server.py run in
-separate containers on Render with no shared filesystem.
+Designed to be safe to run repeatedly: if a stage-1 selection OR a
+stage-2 approval is already pending, this run skips entirely rather
+than piling up competing requests.
+
+State (history, pending selections/approvals, image bytes) lives in
+Postgres via db.py, not local files — this process and
+webhook_server.py run in separate containers on Render with no shared
+filesystem.
 """
 
 import sys
@@ -26,7 +35,6 @@ import config
 import db
 import ingest
 import generate
-import generate_image
 import safety
 import whatsapp_client
 
@@ -52,8 +60,13 @@ def run() -> None:
 
     db.init_schema()
 
+    if db.has_pending_selection():
+        log("A draft-option selection is already waiting on your WhatsApp decision "
+            "(stage 1). Skipping this run rather than sending a second request.")
+        return
+
     if db.has_pending():
-        log("A pending approval is already waiting on your WhatsApp decision. "
+        log("A final post is already waiting on your WhatsApp approval (stage 2). "
             "Skipping this run rather than sending a second request.")
         return
 
@@ -71,70 +84,56 @@ def run() -> None:
         url = item.get("url")
         log(f"Trying item: '{title}' (source: {item['source']})")
 
-        drafts = generate.generate_drafts(item)
-        if drafts is None:
-            log(f"  Generation failed for this item, skipping.")
+        options = generate.generate_draft_options(item)
+        if options is None:
+            log("  Generation failed (or Claude skipped this item), trying next candidate.")
             continue
 
-        x_text = drafts["x"]
-        linkedin_text = drafts["linkedin"]
-        facebook_text = drafts["facebook"]
+        # --- Safety gate each option's X draft individually; drop failures ---
+        surviving_options = []
+        for i, option in enumerate(options):
+            result = safety.run_all_checks(
+                option["x"],
+                platform="x",
+                max_len=config.MAX_X_POST_LENGTH,
+                max_per_day=config.MAX_X_POSTS_PER_DAY,
+                source_url=url,
+            )
+            if result.ok:
+                surviving_options.append(option)
+            else:
+                log(f"  Option {i+1} ('{option.get('angle_label', '?')}') BLOCKED: {result.reason}")
 
-        # --- Safety gates on the X draft ---
-        result = safety.run_all_checks(
-            x_text,
-            platform="x",
-            max_len=config.MAX_X_POST_LENGTH,
-            max_per_day=config.MAX_X_POSTS_PER_DAY,
-            source_url=url,
-        )
-
-        if not result.ok:
-            log(f"  X draft BLOCKED: {result.reason}")
-            db.record_post("x", x_text, source_url=url, status="blocked")
-            log("  Trying next candidate item instead of sending a blocked draft for approval.")
+        if len(surviving_options) < 3:
+            log(f"  Only {len(surviving_options)}/3 options passed safety checks — "
+                f"need all 3 for a clean selection. Trying next candidate item instead "
+                f"of sending a partial/blocked set for selection.")
+            if surviving_options:
+                # Record the ones that did pass as blocked-context, so dedup/
+                # history still reflects that this content existed.
+                for option in surviving_options:
+                    db.record_post("x", option["x"], source_url=url, status="blocked_partial_set")
             continue
 
-        # --- Generate one branded image, reused across all three platforms ---
-        image_result = generate_image.generate_image(item, drafts=drafts)
-        image_id = image_result["image_id"] if image_result else None
-        if image_id:
-            log(f"  Image generated and stored (image_id={image_id})")
-        else:
-            log("  Image generation failed.")
-
-        if not image_id:
-            log("  No image available — cannot use the image-header approval template. "
-                "Skipping this item; trying the next one.")
-            continue
-
-        # --- Park the candidate as a pending approval (nothing posts yet) ---
-        approval_id = db.create_pending(
-            item, x_text, linkedin_text, facebook_text, image_id, source_url=url,
-        )
-        log(f"  Created pending approval (id={approval_id}). Sending to WhatsApp for review.")
-
-        if not config.PUBLIC_BASE_URL:
-            log("  FATAL: PUBLIC_BASE_URL is not set in .env — cannot build a public image URL "
-                "for the WhatsApp template. See README. Aborting this run.")
-            return
-        image_url = f"{config.PUBLIC_BASE_URL}/images/{image_id}"
-
-        caption = x_text if len(x_text) <= 200 else x_text[:197] + "..."
+        # --- Park as a pending selection (nothing generated/posted yet) ---
+        selection_id = db.create_pending_selection(item, options, source=item.get("source", "rss"), source_url=url)
+        log(f"  Created pending selection (id={selection_id}) with 3 options. "
+            f"Sending to WhatsApp for your pick.")
 
         try:
-            whatsapp_client.send_approval_request(image_url, caption, approval_id)
-            log(f"  Approval request sent to WhatsApp. Waiting for your decision "
-                f"(no timeout — nothing posts until you respond).")
+            whatsapp_client.send_options_request(title, options, selection_id)
+            log(f"  Options request sent to WhatsApp. Waiting for your pick "
+                f"(auto-picks option 1 after {config.SELECTION_TIMEOUT_HOURS}h if no response).")
         except Exception as e:
-            log(f"  FAILED to send WhatsApp approval request: {e}\n{traceback.format_exc()}")
-            log("  Rolling back pending approval since you were never notified.")
-            db.resolve(approval_id, "failed_to_notify")
+            log(f"  FAILED to send WhatsApp options request: {e}\n{traceback.format_exc()}")
+            log("  Rolling back pending selection since you were never notified.")
+            db.resolve_selection(selection_id, "failed_to_notify")
+            continue
 
-        log("=== Daily run completed — awaiting your approval ===")
+        log("=== Daily run completed — awaiting your topic/draft pick ===")
         return
 
-    log("No item succeeded through generation/safety checks. Nothing sent for approval today.")
+    log("No item succeeded through generation/safety checks. Nothing sent for selection today.")
 
 
 if __name__ == "__main__":

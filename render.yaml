@@ -90,5 +90,9 @@ envVarGroups:
         value: post_approval_request
       - key: WHATSAPP_BODY_PARAM_NAME
         value: post_summary
+      - key: WHATSAPP_OPTIONS_TEMPLATE_NAME
+        value: draft_options_request
+      - key: SELECTION_TIMEOUT_HOURS
+        value: "8"
       - key: PUBLIC_BASE_URL
         sync: false

@@ -4,35 +4,47 @@ Always-on FastAPI web service. On Render this runs as a Web Service
 WhatsApp button taps are handled immediately).
 
 Responsibilities:
-  1. GET  /webhook        — Meta's one-time webhook verification handshake.
-  2. POST /webhook         — receives button-tap events when you approve/
-     reject a pending post from WhatsApp.
-  3. GET  /images/{image_id} — serves a generated image (stored in
+  1. GET  /webhook            — Meta's one-time webhook verification handshake.
+  2. POST /webhook            — receives all inbound WhatsApp events:
+       - "pick:<selection_id>:<n>"   button tap -> stage-1 choice made
+       - "approve:<id>" / "reject:<id>" button tap -> stage-2 decision
+       - plain text message -> Flow B: a new topic you're texting in
+  3. GET  /images/{image_id}  — serves a generated image (stored in
      Postgres, not local disk) over HTTPS so Meta's servers can fetch
-     it for the template's image header.
+     it for template image headers.
+  4. A background scheduler (APScheduler) checks every few minutes for
+     a stage-1 selection that's been pending longer than
+     config.SELECTION_TIMEOUT_HOURS, and auto-picks option 1 if so.
 
-This process does NOT generate content or talk to Claude/OpenAI/X
-directly for the daily flow — it only reacts to your approval decision
-and then calls publish_x.py to finish the job that main.py started and
-parked in the shared Postgres database (via db.py).
+This process is also where ALL content generation now happens for
+Flow B (you texting a topic) and the image-generation step for BOTH
+flows (it only happens after a stage-1 pick, whether by you or by
+timeout) — main.py (the cron job) only handles Flow A's initial
+RSS-sourced stage-1 selection.
 
-LinkedIn/Facebook drafts are sent to you as a WhatsApp text message
-after approval, rather than written to a file — this process and the
+LinkedIn/Facebook drafts and all confirmations are sent as WhatsApp
+text messages rather than written to a file — this process and the
 cron job run in separate containers with no shared filesystem.
 """
 
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
+from apscheduler.schedulers.background import BackgroundScheduler
 
 import config
 import db
+import url_extract
+import generate
+import generate_image
 import publish_x
+import safety
 import whatsapp_client
 
 app = FastAPI()
+_scheduler = BackgroundScheduler()
 
 
 def log(message: str) -> None:
@@ -54,6 +66,21 @@ def on_startup():
         log("WARNING: DATABASE_URL not set — the app will fail on any request that touches the database.")
     if not config.WHATSAPP_VERIFY_TOKEN:
         log("WARNING: WHATSAPP_VERIFY_TOKEN is not set — webhook verification will fail.")
+
+    _scheduler.add_job(
+        _check_selection_timeout,
+        "interval",
+        minutes=15,
+        id="selection_timeout_sweep",
+        replace_existing=True,
+    )
+    _scheduler.start()
+    log("Background scheduler started (checks stage-1 selection timeout every 15 min).")
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    _scheduler.shutdown(wait=False)
 
 
 @app.get("/images/{image_id}")
@@ -89,7 +116,7 @@ def verify_webhook(request: Request):
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Receives incoming WhatsApp events, including button-tap replies."""
+    """Receives incoming WhatsApp events: button taps and plain text."""
     try:
         data = await request.json()
     except Exception:
@@ -111,9 +138,12 @@ async def handle_webhook(request: Request):
 
 
 def _handle_message(message: dict) -> None:
-    """Process a single inbound message, looking for a button reply."""
+    """Process a single inbound message: button reply (pick / approve /
+    reject) or a plain text message (treated as a new Flow B topic if
+    nothing relevant is currently pending)."""
     button_reply = message.get("button")
     interactive = message.get("interactive")
+    text_body = message.get("text", {}).get("body") if message.get("type") == "text" else None
 
     payload = None
     if button_reply:
@@ -121,17 +151,206 @@ def _handle_message(message: dict) -> None:
     elif interactive and interactive.get("type") == "button_reply":
         payload = interactive.get("button_reply", {}).get("id")
 
-    if not payload or ":" not in payload:
-        log(f"Received message without a recognizable button payload: {message}")
+    if payload and ":" in payload:
+        _handle_button_payload(payload)
         return
 
-    decision, _, approval_id = payload.partition(":")
-    if decision not in ("approve", "reject"):
-        log(f"Unrecognized decision '{decision}' in payload: {payload}")
+    if text_body:
+        _handle_text_message(text_body)
         return
 
-    log(f"Received '{decision}' for approval_id={approval_id}")
-    _process_decision(approval_id, decision)
+    log(f"Received message with no recognizable payload or text body: {message}")
+
+
+def _handle_button_payload(payload: str) -> None:
+    parts = payload.split(":")
+    action = parts[0]
+
+    if action == "pick" and len(parts) == 3:
+        selection_id, option_str = parts[1], parts[2]
+        try:
+            option_number = int(option_str)
+        except ValueError:
+            log(f"Unrecognized option number in pick payload: {payload}")
+            return
+        log(f"Received pick (option {option_number}) for selection_id={selection_id}")
+        _process_pick(selection_id, option_number, auto_picked=False)
+
+    elif action in ("approve", "reject") and len(parts) == 2:
+        approval_id = parts[1]
+        log(f"Received '{action}' for approval_id={approval_id}")
+        _process_decision(approval_id, action)
+
+    else:
+        log(f"Unrecognized button payload shape: {payload}")
+
+
+def _handle_text_message(text_body: str) -> None:
+    """Flow B: if nothing is currently pending, treat this free-text
+    message as a new topic to generate draft options for. If something
+    IS pending, this is just incidental chatter (e.g. you typed
+    something instead of tapping a button) — log and ignore, since
+    button taps are the only supported way to make a pending decision.
+    """
+    if db.has_pending_selection():
+        log(f"Received text message while a selection is already pending — "
+            f"ignoring as chatter (use the buttons to pick): {text_body[:80]}")
+        return
+    if db.has_pending():
+        log(f"Received text message while a final approval is already pending — "
+            f"ignoring as chatter (use the buttons to approve/reject): {text_body[:80]}")
+        return
+
+    log(f"Treating inbound text as a new Flow B topic request: {text_body[:80]}")
+
+    url = url_extract.extract_url(text_body)
+    headline = url_extract.strip_url(text_body, url) if url else text_body.strip()
+
+    summary = ""
+    final_url = url
+    if url:
+        log(f"  Message contains a URL, attempting to fetch and extract article text: {url}")
+        article = url_extract.fetch_article(url)
+        if article:
+            summary = article["text"]
+            final_url = article["final_url"]
+            log(f"  Extracted {len(summary)} chars of article text "
+                f"(resolved to {final_url})" if final_url != url else
+                f"  Extracted {len(summary)} chars of article text.")
+        else:
+            log("  Article extraction failed or returned too little content — "
+                "falling back to the headline text alone, without inventing "
+                "article details.")
+            # Tell Claude explicitly that no article content is available,
+            # rather than silently giving it an empty summary (which it
+            # might fill in with guessed/hallucinated specifics).
+            summary = ("(No article content could be retrieved from the link in "
+                       "this message — write based on the headline alone, and do "
+                       "not invent specific facts, figures, or quotes that would "
+                       "need to come from the actual article.)")
+
+    item = {"title": headline or "(see linked article)", "summary": summary,
+            "url": final_url, "source": "whatsapp"}
+
+    options = generate.generate_draft_options(item)
+    if options is None:
+        try:
+            whatsapp_client.send_text(
+                "I couldn't turn that into a clean AI-education post — it might not "
+                "have a strong enough AI angle, or something went wrong generating "
+                "drafts. Try rephrasing the topic, or send me a different one."
+            )
+        except Exception as e:
+            log(f"Failed to send Flow B failure notice: {e}")
+        return
+
+    surviving_options = []
+    for i, option in enumerate(options):
+        result = safety.run_all_checks(
+            option["x"], platform="x", max_len=config.MAX_X_POST_LENGTH,
+            max_per_day=config.MAX_X_POSTS_PER_DAY, source_url=item.get("url"),
+        )
+        if result.ok:
+            surviving_options.append(option)
+        else:
+            log(f"Flow B option {i+1} BLOCKED: {result.reason}")
+
+    if len(surviving_options) < 3:
+        try:
+            whatsapp_client.send_text(
+                "I generated drafts for that topic, but one or more didn't pass "
+                "safety checks (rate limit, blocklist, etc.), so I don't have a "
+                "clean set of 3 to show you. Try again, possibly later today."
+            )
+        except Exception as e:
+            log(f"Failed to send Flow B partial-block notice: {e}")
+        return
+
+    selection_id = db.create_pending_selection(item, options, source="whatsapp", source_url=item.get("url"))
+    log(f"Created pending selection (id={selection_id}) from Flow B topic request.")
+
+    # Flow B is already inside an open session (you just messaged us), so
+    # we could use a free interactive message here instead of a template —
+    # but reusing the same template keeps the code path identical to Flow A
+    # and avoids maintaining two different selection-UI implementations.
+    try:
+        whatsapp_client.send_options_request(item["title"], options, selection_id)
+        log("Options request sent to WhatsApp for Flow B topic.")
+    except Exception as e:
+        log(f"FAILED to send Flow B options request: {e}\n{traceback.format_exc()}")
+        db.resolve_selection(selection_id, "failed_to_notify")
+
+
+def _process_pick(selection_id: str, option_number: int, auto_picked: bool) -> None:
+    decision = "auto_chosen" if auto_picked else "chosen"
+    entry = db.resolve_selection(selection_id, decision, chosen_option=option_number)
+    if entry is None:
+        log(f"selection_id={selection_id} did not match the current pending selection "
+            f"(already resolved, or stale webhook retry) — ignoring.")
+        return
+
+    option_key = f"option_{option_number}"
+    chosen = entry.get(option_key)
+    if not chosen:
+        log(f"ERROR: resolved selection has no '{option_key}' data: {entry}")
+        return
+
+    item = {"title": entry.get("item_title", ""), "summary": "", "url": entry.get("source_url")}
+
+    if auto_picked:
+        try:
+            whatsapp_client.send_text(
+                f"No response after {config.SELECTION_TIMEOUT_HOURS}h, so I went with "
+                f"option 1 ({chosen.get('angle_label', '')}) automatically. "
+                f"Generating the image now..."
+            )
+        except Exception as e:
+            log(f"Failed to send auto-pick notice: {e}")
+    else:
+        try:
+            whatsapp_client.send_text(
+                f"Picked: {chosen.get('angle_label', f'Option {option_number}')}. "
+                f"Generating the image now..."
+            )
+        except Exception as e:
+            log(f"Failed to send pick confirmation: {e}")
+
+    # --- Generate the branded image for the chosen option ---
+    image_result = generate_image.generate_image(item, drafts=chosen)
+    image_id = image_result["image_id"] if image_result else None
+    if not image_id:
+        log(f"Image generation FAILED for selection_id={selection_id}")
+        try:
+            whatsapp_client.send_text(
+                "Image generation failed for that option — nothing was posted. "
+                "You can try texting me the topic again."
+            )
+        except Exception as e:
+            log(f"Failed to send image-failure notice: {e}")
+        return
+
+    log(f"Image generated and stored (image_id={image_id}) for selection_id={selection_id}")
+
+    # --- Move into stage-2: the existing final approval flow ---
+    approval_id = db.create_pending(
+        item, chosen["x"], chosen["linkedin"], chosen["facebook"], image_id,
+        source_url=entry.get("source_url"),
+    )
+    log(f"Created pending approval (id={approval_id}) for the chosen option.")
+
+    if not config.PUBLIC_BASE_URL:
+        log("FATAL: PUBLIC_BASE_URL is not set — cannot build a public image URL "
+            "for the WhatsApp template. Aborting before sending stage-2 request.")
+        return
+    image_url = f"{config.PUBLIC_BASE_URL}/images/{image_id}"
+    caption = chosen["x"] if len(chosen["x"]) <= 200 else chosen["x"][:197] + "..."
+
+    try:
+        whatsapp_client.send_approval_request(image_url, caption, approval_id)
+        log("Stage-2 final approval request sent to WhatsApp.")
+    except Exception as e:
+        log(f"FAILED to send stage-2 approval request: {e}\n{traceback.format_exc()}")
+        db.resolve(approval_id, "failed_to_notify")
 
 
 def _process_decision(approval_id: str, decision: str) -> None:
@@ -168,8 +387,6 @@ def _process_decision(approval_id: str, decision: str) -> None:
     db.record_post("linkedin", entry["linkedin_text"], source_url=entry.get("source_url"), status="draft")
     db.record_post("facebook", entry["facebook_text"], source_url=entry.get("source_url"), status="draft")
 
-    # Send LinkedIn/Facebook drafts as WhatsApp text (no shared file storage
-    # between this process and the cron job, so a file isn't an option).
     try:
         whatsapp_client.send_text(
             f"{confirmation}\n\n"
@@ -178,3 +395,25 @@ def _process_decision(approval_id: str, decision: str) -> None:
         )
     except Exception as e:
         log(f"Failed to send approval confirmation / drafts: {e}")
+
+
+def _check_selection_timeout() -> None:
+    """Runs every 15 minutes (via APScheduler). If a stage-1 selection
+    has been pending longer than config.SELECTION_TIMEOUT_HOURS, auto-
+    picks option 1 rather than waiting indefinitely (unlike stage-2,
+    which always waits indefinitely by design)."""
+    try:
+        pending = db.get_pending_selection()
+        if pending is None:
+            return
+        created_at = pending["created_at"]
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - created_at
+        if age >= timedelta(hours=config.SELECTION_TIMEOUT_HOURS):
+            log(f"Stage-1 selection {pending['selection_id']} has been pending for "
+                f"{age}, exceeding {config.SELECTION_TIMEOUT_HOURS}h timeout — "
+                f"auto-picking option 1.")
+            _process_pick(pending["selection_id"], 1, auto_picked=True)
+    except Exception as e:
+        log(f"ERROR in selection timeout sweep: {e}\n{traceback.format_exc()}")
